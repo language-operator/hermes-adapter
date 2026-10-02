@@ -1,10 +1,10 @@
 ---
 description: Bring every pinned upstream dependency up to date, with an audit trail
-argument-hint: "[all|base|opencode|actions] (default: all)"
-allowed-tools: Bash(git:*), Bash(gh:*), Bash(npm:*), Bash(curl:*), Bash(jq:*), Bash(docker:*), Bash(helm:*), Bash(make:*), Bash(diff:*), Read, Edit, Grep
+argument-hint: "[all|base|hermes|actions] (default: all)"
+allowed-tools: Bash(git:*), Bash(gh:*), Bash(curl:*), Bash(jq:*), Bash(docker:*), Bash(helm:*), Bash(make:*), Bash(diff:*), Read, Edit, Grep
 ---
 
-Update the upstream dependencies of `opencode-adapter`. Scope: **$ARGUMENTS** (empty means `all`).
+Update the upstream dependencies of `hermes-adapter`. Scope: **$ARGUMENTS** (empty means `all`).
 
 This runs for security and compliance: the point is not only that versions move, but that
 the move is **recorded** — old version, new version, digest, and what changed — so the PR
@@ -27,25 +27,18 @@ config ETL all come from here, so this is the security-relevant one.
 conformance suite ships inside the image and CI extracts it from the build, so there is no
 separate suite version to keep in step.
 
-**2. The opencode CLI** — `Dockerfile` `ARG OPENCODE_VERSION`, installed as the npm package
-`opencode-ai`.
+**2. Hermes Agent** — `Dockerfile` `ARG HERMES_VERSION`, a git tag of
+`NousResearch/hermes-agent` installed with `uv`. Tags are date-based (`v2026.9.24`); the
+package version they carry (`0.21.5`) is in `pyproject.toml` at that tag. PyPI lags the
+tags, so it is not the source.
 
 **3. GitHub Actions** — across `.github/workflows/{test,build-image,release-chart}.yaml`:
 `actions/checkout`, `docker/setup-buildx-action`, `docker/login-action`,
 `docker/metadata-action`, `docker/build-push-action`, `azure/setup-helm`.
 
-**4. Vendored upstream files** — `runtime.json` and `emit.mjs` are **verbatim copies** of
-`examples/opencode/` in `coding-runtime`. Nothing fails when they drift from upstream, which
-is exactly why they get missed. Re-copy and diff them whenever the base moves.
-
-**5. The `/iterate` command** — `.claude/commands/iterate.md` and the three scripts in
-`.claude/commands/iterate/` are **verbatim copies** from `language-operator` (canonical, see
-language-operator#932), except `iterate.md`'s `allowed-tools` build-tool entries and its
-`## Testing` section, which are marked `<!-- per-repo -->`. These drift the same way the
-files above do, and silently: a stale copy still runs, it just runs the old steps. Re-copy
-the scripts wholesale; for `iterate.md`, lift the two per-repo regions out of the current
-file, re-copy the canonical body, and put them back — then diff against canonical to prove
-nothing else moved.
+**4. The `/iterate` skill** — comes from the `langop` plugin, pinned by `ref` in
+`.claude/settings.json`. Taking a newer release means changing that `ref`; there is no copy
+in this repo to re-sync.
 
 ## Rules that must not be broken
 
@@ -55,8 +48,8 @@ nothing else moved.
   satisfy — every boot warns about a mismatch that is not real — and which also fails the
   conformance suite's own `reports a version` check, since that asserts semver. Only
   released semver tags.
-- **opencode: take the `latest` dist-tag only.** The package also publishes `next`, `beta`
-  and `dev` tags carrying `0.0.0-*` versions; none of them belong in a release image.
+- **Hermes: take the latest *release* only** (`releases/latest`), never `main` or a
+  prerelease.
 - **Do not unpin anything to make an update easier.** If a pin is in the way, that is the
   finding — report it rather than loosening it.
 
@@ -77,7 +70,7 @@ Stop and report if any precondition fails; do not continue past a failure.
 the "before" column of the audit trail.
 
 ```bash
-grep -nE 'ARG (BASE|OPENCODE_VERSION)' Dockerfile
+grep -nE 'ARG (BASE|HERMES_VERSION)' Dockerfile
 grep -rn 'CODING_RUNTIME_VERSION' Makefile hack/conformance.sh .github/workflows/
 grep -rn 'uses: .*@' .github/workflows/
 ```
@@ -98,14 +91,13 @@ curl -sI -H "Authorization: Bearer $T" \
   | grep -i docker-content-digest
 ```
 
-opencode CLI — the `latest` dist-tag:
+Hermes Agent — the latest release, and the package version it carries:
 
 ```bash
-npm view opencode-ai dist-tags --json
+gh api repos/NousResearch/hermes-agent/releases/latest --jq .tag_name
+gh api "repos/NousResearch/hermes-agent/contents/pyproject.toml?ref=<tag>" --jq .content \
+  | base64 -d | grep -m1 '^version'
 ```
-
-If npm fails with `ENOENT … mkdir '/home/node/.npm'`, the cache directory is read-only in
-this environment; re-run with `npm_config_cache="$(mktemp -d)"` prefixed.
 
 GitHub Actions — latest release per action:
 
@@ -134,20 +126,7 @@ record why.
 
 - **Base:** update `ARG BASE` with the new tag **and** its digest, then the three
   `CODING_RUNTIME_VERSION` locations to the matching `vX.Y.Z`.
-- **Vendored files:** re-copy from the new base tag and diff before committing, so an
-  upstream change to the emitter or manifest is seen rather than silently kept or silently
-  clobbered:
-
-  ```bash
-  gh api repos/language-operator/coding-runtime/contents/examples/opencode/runtime.json?ref=<vX.Y.Z> --jq .content | base64 -d > /tmp/runtime.json
-  gh api repos/language-operator/coding-runtime/contents/examples/opencode/emit.mjs?ref=<vX.Y.Z>   --jq .content | base64 -d > /tmp/emit.mjs
-  diff -u runtime.json /tmp/runtime.json; diff -u emit.mjs /tmp/emit.mjs
-  ```
-
-  If either differs, take the upstream copy and describe the change in the PR. If
-  `runtime.json` gained a field this adapter should set, that is a real decision — surface
-  it rather than copying past it.
-- **opencode:** update `ARG OPENCODE_VERSION`.
+- **Hermes:** update `ARG HERMES_VERSION`.
 - **Actions:** update the `uses:` pins.
 
 **6. Re-read how the suite is obtained.** CI and `make test` extract
@@ -158,7 +137,7 @@ fetching a tag, which is what let the suite drift from the runtime in the first 
 **7. Verify.**
 
 ```bash
-helm lint chart && helm template opencode chart >/dev/null
+helm lint chart && helm template hermes chart >/dev/null
 make test        # builds the image and runs the conformance suite; needs Docker
 ```
 
