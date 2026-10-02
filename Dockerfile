@@ -17,16 +17,31 @@ ARG HERMES_VERSION=v2026.9.24
 FROM ${BASE}
 ARG HERMES_VERSION
 
-# Hermes Agent, from a git tag: PyPI lags the tagged releases. Installed into an
-# image-owned venv on the base's Debian python3 (Hermes wants >=3.11,<3.14),
-# never a uv-downloaded interpreter. Pinned — do not track `main`, so runtime
-# behaviour is reproducible.
+# Hermes Agent, from a git tag: PyPI lags the tagged releases, and upstream
+# refuses to build a wheel at all (setup.py guards bdist_wheel/sdist) because
+# its bundled assets are resolved from the source-checkout layout. So this does
+# what upstream's own image does: a checkout at /opt/hermes, its locked
+# dependencies from uv.lock (hash-verified, --frozen), and Hermes itself as an
+# editable install into /opt/hermes/.venv. Core dependencies only — no extras,
+# and no Node web/TUI bundles: the default `hermes` interface is the classic
+# Python CLI.
+#
+# On the base's Debian python3 (Hermes wants >=3.11,<3.14), never a
+# uv-downloaded interpreter. Pinned — do not track `main`, so runtime behaviour
+# is reproducible. /opt/hermes stays root-owned; the root filesystem is
+# read-only at runtime, so nothing may try to write bytecode there.
 USER root
-ENV UV_PYTHON_DOWNLOADS=never
-RUN uv venv --python /usr/bin/python3 /opt/hermes \
-    && uv pip install --python /opt/hermes/bin/python --no-cache \
-        "hermes-agent @ git+https://github.com/NousResearch/hermes-agent@${HERMES_VERSION}" \
-    && ln -s /opt/hermes/bin/hermes /usr/local/bin/hermes
+ENV UV_PYTHON_DOWNLOADS=never \
+    PYTHONDONTWRITEBYTECODE=1
+RUN git clone --quiet --depth 1 --branch "${HERMES_VERSION}" \
+        https://github.com/NousResearch/hermes-agent.git /opt/hermes \
+    && cd /opt/hermes \
+    && UV_PROJECT_ENVIRONMENT=/opt/hermes/.venv uv sync --frozen --no-dev --no-cache \
+        --python /usr/bin/python3 \
+    && rm -rf /opt/hermes/.git \
+    && ln -s /opt/hermes/.venv/bin/hermes /usr/local/bin/hermes \
+    && HERMES_HOME=/tmp/hermes-smoke hermes --version \
+    && rm -rf /tmp/hermes-smoke
 
 # runtime.json  — what this adapter is: config dir, serving surface, tmux launch.
 # emit.mjs      — normalized operator config -> Hermes's config (stub until #1).
